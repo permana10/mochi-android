@@ -2,7 +2,6 @@ package id.skeypro.mochi
 
 import android.Manifest
 import android.app.Activity
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
@@ -24,7 +23,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import java.nio.charset.Charset
 import java.util.UUID
 
 class MainActivity : Activity() {
@@ -158,48 +156,46 @@ class MainActivity : Activity() {
     }
 
     private val scanCallback = object : ScanCallback() {
+        private val seen = mutableSetOf<String>()
+
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             if (!scanning) return
 
-            val record = result.scanRecord
-            val name = try {
-                result.device.name ?: record?.deviceName
-            } catch (_: SecurityException) {
-                record?.deviceName
+            try {
+                val name = try { result.device.name } catch (_: SecurityException) { null }
+                    ?: result.scanRecord?.deviceName
+                    ?: "(tanpa nama)"
+                val address = result.device.address
+                val rssi = result.rssi
+                val serviceMatch = result.scanRecord?.serviceUuids
+                    ?.any { it.uuid == SERVICE_UUID } == true
+
+                if (seen.add(address)) {
+                    log("BLE: nama=$name | MAC=$address | RSSI=$rssi dBm")
+                }
+
+                val savedAddress = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getString(KEY_DEVICE, null)
+
+                val isMochi = name.equals(DEVICE_NAME, true) ||
+                    serviceMatch ||
+                    (!savedAddress.isNullOrBlank() && address.equals(savedAddress, true))
+
+                if (!isMochi) return
+
+                stopScan()
+                getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit().putString(KEY_DEVICE, address).apply()
+
+                log("MOCHI ditemukan: $name | $address")
+                MochiBleService.connect(applicationContext, address)
+            } catch (e: SecurityException) {
+                log("Gagal membaca hasil BLE: ${e.message}")
             }
-
-            val address = try {
-                result.device.address
-            } catch (_: SecurityException) {
-                ""
-            }
-
-            val advertisesService = record?.serviceUuids
-                ?.any { it.uuid == SERVICE_UUID } == true
-
-            val savedAddress = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getString(KEY_DEVICE, null)
-
-            log("BLE ditemukan: nama=${name ?: "(tanpa nama)"}, alamat=$address")
-
-            val isMochi = name.equals(DEVICE_NAME, ignoreCase = true) ||
-                advertisesService ||
-                (!savedAddress.isNullOrBlank() && address.equals(savedAddress, ignoreCase = true))
-
-            if (!isMochi || address.isBlank()) return
-
-            stopScan()
-            getSharedPreferences(PREFS, MODE_PRIVATE)
-                .edit().putString(KEY_DEVICE, address).apply()
-
-            statusText.text = "Status: MOCHI ditemukan ($address)"
-            log("MOCHI ditemukan, mencoba koneksi BLE ke $address...")
-            MochiBleService.connect(applicationContext, address)
         }
 
         override fun onScanFailed(errorCode: Int) {
             scanning = false
-            statusText.text = "Status: pemindaian BLE gagal"
             log("Scan BLE gagal: kode $errorCode")
         }
     }
