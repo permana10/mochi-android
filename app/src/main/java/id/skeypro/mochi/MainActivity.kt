@@ -77,18 +77,19 @@ class MainActivity : Activity() {
     }
     private fun matchWrap() = LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT)
 
+    // Android 12+ (API 31+) memakai izin BLUETOOTH_SCAN/CONNECT.
+    // ACCESS_FINE_LOCATION tidak boleh diwajibkan pada Android 12+ untuk alur BLE ini.
     private fun hasPermissions() = if (Build.VERSION.SDK_INT >= 31) {
         checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED &&
-        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED &&
-        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
+        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED
     } else if (Build.VERSION.SDK_INT >= 23) {
         checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
     } else true
 
     private fun requestBlePermissions() {
         if (Build.VERSION.SDK_INT >= 31) {
-            val a=arrayOf(Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT)
-            val missing=a.filter { checkSelfPermission(it)!=PackageManager.PERMISSION_GRANTED }
+            val required=arrayOf(Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT)
+            val missing=required.filter { checkSelfPermission(it)!=PackageManager.PERMISSION_GRANTED }
             if(missing.isNotEmpty()) requestPermissions(missing.toTypedArray(),100)
         } else if(Build.VERSION.SDK_INT>=23 && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),100)
@@ -100,7 +101,7 @@ class MainActivity : Activity() {
     }
 
     private fun startScan() {
-        if(!hasPermissions()) { requestBlePermissions(); log("Izin Bluetooth/LOKASI belum lengkap; izinkan semuanya lalu tekan scan lagi."); return }
+        if(!hasPermissions()) { requestBlePermissions(); log("Izin yang diperlukan belum diberikan. Izinkan permintaan Android, lalu tekan scan lagi."); return }
         val bt=adapter
         if(bt==null) { log("Adaptor Bluetooth tidak tersedia."); return }
         try {
@@ -123,7 +124,7 @@ class MainActivity : Activity() {
         if(scanning) {
             stopScan()
             log("Scan selesai. Perangkat unik diterima callback: ${seen.size}")
-            if(seen.isEmpty()) log("CALLBACK BLE = 0. Izin aplikasi sudah diperiksa; cek izin Lokasi, aktifkan Lokasi Android, lalu uji lagi. Jika nRF Connect melihat MOCHI pada saat yang sama, ambil logcat ScanCallback untuk mencari error sistem.")
+            if(seen.isEmpty()) log("Callback menerima 0 iklan BLE. Izin sudah lolos; perlu periksa hasil scan Android/logcat. Tidak perlu meminta izin Lokasi pada Android 12+.")
             else if(connectingAddress==null) log("Perangkat terlihat, tetapi nama MOCHI/MAC tersimpan belum cocok. Periksa daftar BLE di log.")
         }
     }
