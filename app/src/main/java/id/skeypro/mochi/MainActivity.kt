@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.location.LocationManager
 import android.text.method.ScrollingMovementMethod
 import android.view.Gravity
 import android.view.ViewGroup
@@ -34,7 +35,6 @@ class MainActivity : Activity() {
         const val KEY_SERVICE_UUID = "service_uuid"
         const val KEY_RX_UUID = "rx_uuid"
         const val KEY_TX_UUID = "tx_uuid"
-        const val MOCHI_SERVICE_UUID = "7b8a0001-6d8f-4f3a-9c2e-1b4a5d6e7f80"
         private const val SCAN_MS = 15000L
     }
     private lateinit var statusText: TextView
@@ -79,7 +79,8 @@ class MainActivity : Activity() {
 
     private fun hasPermissions() = if (Build.VERSION.SDK_INT >= 31) {
         checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED &&
-        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED
+        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED &&
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
     } else if (Build.VERSION.SDK_INT >= 23) {
         checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
     } else true
@@ -99,39 +100,38 @@ class MainActivity : Activity() {
     }
 
     private fun startScan() {
-        if(!hasPermissions()) { requestBlePermissions(); log("Izin Bluetooth diperlukan."); return }
+        if(!hasPermissions()) { requestBlePermissions(); log("Izin Bluetooth/LOKASI belum lengkap; izinkan semuanya lalu tekan scan lagi."); return }
         val bt=adapter
         if(bt==null) { log("Adaptor Bluetooth tidak tersedia."); return }
         try {
             if(!bt.isEnabled) { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)); log("Aktifkan Bluetooth lalu scan lagi."); return }
             stopScan()
             val scanner=bt.bluetoothLeScanner
-            if(scanner==null) { log("BLE scanner tidak tersedia."); return }
+            if(scanner==null) { log("BLE scanner tidak tersedia dari adaptor Android."); return }
+            handler.removeCallbacks(scanTimeout)
             seen.clear(); attempts.clear(); connectingAddress=null; scanning=true
             statusText.text="Status: mencari perangkat BLE..."
-            log("Memindai semua perangkat BLE selama 15 detik.")
+            log("Mulai BLE scan standar tanpa filter. Android=${Build.VERSION.SDK_INT}; adapter=${bt.isEnabled}; scanner=tersedia.")
+            // Pakai overload standar Android. Tidak memasang filter nama/service karena
+            // nama MOCHI dapat berada di scan response, bukan paket advertising utama.
             scanner.startScan(callback)
-            log("Scan BLE dimulai tanpa filter; service target=${MOCHI_SERVICE_UUID}")
-            handler.postDelayed({
-                if(scanning) {
-                    stopScan()
-                    log("Scan selesai. Total perangkat ditemukan: ${seen.size}")
-                    if(seen.isEmpty()) log("HASIL=0. Izin/adaptor lolos tetapi callback tidak menerima iklan. Pastikan firmware ESP32-C3 benar-benar upload dan serial menampilkan BLE advertising: MOCHI; reboot ESP32 lalu scan lagi.")
-                    else if(connectingAddress==null) log("Belum menemukan nama MOCHI atau MAC perangkat tersimpan.")
-                }
-            },SCAN_MS)
-        } catch(e:SecurityException) { scanning=false; log("Izin BLE ditolak: ${e.message}") }
-          catch(e:Exception) { scanning=false; log("Gagal scan: ${e.message}") }
+            handler.postDelayed(scanTimeout, SCAN_MS)
+        } catch(e:SecurityException) { scanning=false; log("SecurityException saat scan: ${e.message}") }
+          catch(e:Exception) { scanning=false; log("Gagal memulai scan: ${e.javaClass.simpleName}: ${e.message}") }
+    }
+    private val scanTimeout=Runnable {
+        if(scanning) {
+            stopScan()
+            log("Scan selesai. Perangkat unik diterima callback: ${seen.size}")
+            if(seen.isEmpty()) log("CALLBACK BLE = 0. Izin aplikasi sudah diperiksa; cek izin Lokasi, aktifkan Lokasi Android, lalu uji lagi. Jika nRF Connect melihat MOCHI pada saat yang sama, ambil logcat ScanCallback untuk mencari error sistem.")
+            else if(connectingAddress==null) log("Perangkat terlihat, tetapi nama MOCHI/MAC tersimpan belum cocok. Periksa daftar BLE di log.")
+        }
     }
 
     private val callback=object:ScanCallback() {
         override fun onScanResult(callbackType:Int,result:ScanResult) { process(result) }
         override fun onBatchScanResults(results:MutableList<ScanResult>) { results.forEach { process(it) } }
-        override fun onScanFailed(errorCode:Int) {
-            scanning=false
-            statusText.text="Status: pemindaian BLE gagal ($errorCode)"
-            log("SCAN_FAILED code=$errorCode (1=already started, 2=application registration failed, 3=internal error, 4=feature unsupported, 5=out of hardware resources, 6=scanning too frequently)")
-        }
+        override fun onScanFailed(errorCode:Int) { scanning=false; handler.removeCallbacks(scanTimeout); log("Scan BLE gagal: errorCode=$errorCode (1=already started, 2=application registration failed, 3=internal, 4=feature unsupported, 5=out of hardware resources, 6=scanning too frequently)") }
     }
     private fun process(r:ScanResult) {
         if(!scanning) return
@@ -140,13 +140,11 @@ class MainActivity : Activity() {
             val name=r.scanRecord?.deviceName?.takeIf { it.isNotBlank() }
                 ?: try { r.device.name?.takeIf { it.isNotBlank() } } catch(_:SecurityException) { null }
                 ?: "(tanpa nama)"
-            val advertisedUuids=r.scanRecord?.serviceUuids.orEmpty().map { it.uuid.toString().lowercase() }
-            val uuids=advertisedUuids.joinToString()
+            val uuids=r.scanRecord?.serviceUuids.orEmpty().joinToString { it.uuid.toString() }
             if(seen.add(address)) log("BLE: nama=$name | MAC=$address | RSSI=${r.rssi} dBm | UUID iklan=${uuids.ifBlank { "(tidak diiklankan)" }}")
             val saved=getSharedPreferences(PREFS,MODE_PRIVATE).getString(KEY_DEVICE,null)
-            val serviceMatch=advertisedUuids.contains(MOCHI_SERVICE_UUID)
-            // Firmware MOCHI mengiklankan nama MOCHI dan service UUID di atas.
-            if(!name.equals("MOCHI",true) && !serviceMatch && (saved.isNullOrBlank() || !address.equals(saved,true))) return
+            // UUID tidak ditebak. Hanya auto-connect ke nama MOCHI atau MAC yang pernah tersimpan.
+            if(!name.equals("MOCHI",true) && (saved.isNullOrBlank() || !address.equals(saved,true))) return
             if(!attempts.add(address)) return
             connectingAddress=address
             getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString(KEY_DEVICE,address).putString(KEY_DEVICE_NAME,name).apply()
@@ -156,6 +154,7 @@ class MainActivity : Activity() {
         } catch(e:Exception) { log("Gagal memproses hasil BLE: ${e.message}") }
     }
     private fun stopScan() {
+        handler.removeCallbacks(scanTimeout)
         if(!scanning) return
         try {
             if(Build.VERSION.SDK_INT<31 || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED)
