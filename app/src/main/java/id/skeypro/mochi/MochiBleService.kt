@@ -27,10 +27,12 @@ object MochiBleService {
     private var handshakeTimeout: Runnable?=null
     private val handler=Handler(Looper.getMainLooper())
     @Volatile private var addressToReconnect:String?=null
+    @Volatile private var autoConnectMode=false
+    @Volatile private var handedOffToAutoConnect=false
     @Volatile private var appContext:Context?=null
     private val queue=ArrayDeque<String>()
 
-    @Synchronized fun connect(context:Context,address:String) {
+    @Synchronized fun connect(context:Context,address:String, autoConnect:Boolean=false) {
         appContext=context.applicationContext
         addressToReconnect=address
         if(connected && ready && gatt?.device?.address.equals(address,true)) return
@@ -40,8 +42,8 @@ object MochiBleService {
             val manager=context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
             val device=manager.adapter.getRemoteDevice(address)
             gatt=if(Build.VERSION.SDK_INT>=23)
-                device.connectGatt(context.applicationContext,false,callback,BluetoothDevice.TRANSPORT_LE)
-            else device.connectGatt(context.applicationContext,false,callback)
+                device.connectGatt(context.applicationContext,autoConnect,callback,BluetoothDevice.TRANSPORT_LE)
+            else device.connectGatt(context.applicationContext,autoConnect,callback)
             if(gatt==null) retry()
         } catch(e:Exception) {
             connectionStatus="Gagal menghubungkan: ${e.message}"
@@ -55,7 +57,7 @@ object MochiBleService {
         synchronized(queue) { if(queue.size>=50) { Log.w(TAG,"Queue penuh"); return }; queue.addLast(command) }
         if(!connected || !ready || rx==null || gatt==null) {
             val a=addressToReconnect ?: context.getSharedPreferences(MainActivity.PREFS,0).getString(MainActivity.KEY_DEVICE,null)
-            if(!a.isNullOrBlank() && !connected) connect(context.applicationContext,a)
+            if(!a.isNullOrBlank() && !connected) connect(context.applicationContext,a,autoConnect=true)
             Log.i(TAG,"Perintah diantrekan: $command"); return
         }
         writeNext()
@@ -96,9 +98,16 @@ object MochiBleService {
                 connected=false; ready=false; writing=false; pingVerified=false; rx=null; tx=null
                 handshakeTimeout?.let { handler.removeCallbacks(it) }
                 connectionStatus="BLE terputus (status=$status)"
-                try { g.close() } catch(_:Exception) {}
-                if(gatt===g) gatt=null
-                retry()
+                if (autoConnectMode) {
+                    // Pertahankan objek GATT dan permintaan autoConnect; Android akan
+                    // mencoba koneksi kembali ketika perangkat yang dikenal tersedia.
+                    connectionStatus = "MOCHI mati/di luar jangkauan; menunggu auto-connect Android"
+                    Log.i(TAG, "GATT autoConnect dipertahankan; tidak melakukan scan/retry aktif")
+                } else {
+                    try { g.close() } catch(_:Exception) {}
+                    if(gatt===g) gatt=null
+                    retry()
+                }
             }
         }
 
@@ -242,6 +251,17 @@ object MochiBleService {
                     }
                 }
                 writeNext()
+                if (!handedOffToAutoConnect) {
+                    handedOffToAutoConnect = true
+                    val address = addressToReconnect
+                    val context = appContext
+                    if (address != null && context != null) {
+                        handler.postDelayed({
+                            Log.i(TAG, "Beralih ke koneksi GATT autoConnect tanpa pemindaian aktif berulang")
+                            connect(context, address, autoConnect = true)
+                        }, 700L)
+                    }
+                }
                 return
             }
             if(text.contains("TIME_OK")) connectionStatus="MOCHI terhubung • jam tersinkron"
@@ -256,7 +276,7 @@ object MochiBleService {
         try { g.disconnect() } catch(_:Exception) {}
         try { g.close() } catch(_:Exception) {}
         if(gatt===g) gatt=null
-        retry()
+        if (!autoConnectMode) retry()
     }
     private fun retry() {
         handler.removeCallbacks(reconnectRunnable)
@@ -264,7 +284,8 @@ object MochiBleService {
     }
     private val reconnectRunnable=Runnable {
         val a=addressToReconnect; val c=appContext
-        if(!a.isNullOrBlank() && c!=null && !connected && gatt==null) connect(c,a)
+        if (!autoConnectMode && !a.isNullOrBlank() && c!=null && !connected && gatt==null)
+            connect(c,a,autoConnect=false)
     }
     @Synchronized private fun closeGatt() {
         val old=gatt; gatt=null; connected=false; ready=false; writing=false; pingVerified=false; rx=null; tx=null
