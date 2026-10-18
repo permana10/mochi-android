@@ -159,18 +159,47 @@ class MainActivity : Activity() {
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val name = try { result.device.name ?: result.scanRecord?.deviceName } catch (_: SecurityException) { null }
-            if (name.equals(DEVICE_NAME, ignoreCase = true)) {
-                stopScan()
-                val address = result.device.address
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_DEVICE, address).apply()
-                log("MOCHI ditemukan: $address")
-                statusText.text = "Status: MOCHI ditemukan ($address)"
-                MochiBleService.connect(applicationContext, address)
+            if (!scanning) return
+
+            val record = result.scanRecord
+            val name = try {
+                result.device.name ?: record?.deviceName
+            } catch (_: SecurityException) {
+                record?.deviceName
             }
+
+            val address = try {
+                result.device.address
+            } catch (_: SecurityException) {
+                ""
+            }
+
+            val advertisesService = record?.serviceUuids
+                ?.any { it.uuid == SERVICE_UUID } == true
+
+            val savedAddress = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(KEY_DEVICE, null)
+
+            log("BLE ditemukan: nama=${name ?: "(tanpa nama)"}, alamat=$address")
+
+            val isMochi = name.equals(DEVICE_NAME, ignoreCase = true) ||
+                advertisesService ||
+                (!savedAddress.isNullOrBlank() && address.equals(savedAddress, ignoreCase = true))
+
+            if (!isMochi || address.isBlank()) return
+
+            stopScan()
+            getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putString(KEY_DEVICE, address).apply()
+
+            statusText.text = "Status: MOCHI ditemukan ($address)"
+            log("MOCHI ditemukan, mencoba koneksi BLE ke $address...")
+            MochiBleService.connect(applicationContext, address)
         }
+
         override fun onScanFailed(errorCode: Int) {
             scanning = false
+            statusText.text = "Status: pemindaian BLE gagal"
             log("Scan BLE gagal: kode $errorCode")
         }
     }
