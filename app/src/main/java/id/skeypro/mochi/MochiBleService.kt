@@ -93,45 +93,50 @@ object MochiBleService {
         override fun onServicesDiscovered(g:BluetoothGatt,status:Int) {
             if(g!==gatt) return
             if(status!=BluetoothGatt.GATT_SUCCESS) { connectionStatus="Gagal membaca layanan ($status)"; disconnectRetry(g); return }
-            // Discover actual UUIDs from GATT; no assumed service/RX/TX UUID.
-            data class Candidate(val service:BluetoothGattService,val characteristic:BluetoothGattCharacteristic)
-            var write:Candidate?=null
-            var notify:Candidate?=null
-            for(s in g.services.orEmpty()) for(c in s.characteristics.orEmpty()) {
-                val p=c.properties
-                val canWrite=(p and BluetoothGattCharacteristic.PROPERTY_WRITE)!=0 ||
-                    (p and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)!=0
-                val canNotify=(p and BluetoothGattCharacteristic.PROPERTY_NOTIFY)!=0 ||
-                    (p and BluetoothGattCharacteristic.PROPERTY_INDICATE)!=0
-                if(write==null && canWrite) write=Candidate(s,c)
-                if(canNotify && (notify==null || (write!=null && s.uuid==write!!.service.uuid))) notify=Candidate(s,c)
-                Log.i(TAG,"GATT service=${s.uuid} characteristic=${c.uuid} properties=0x${p.toString(16)}")
+            // UUID harus sama dengan firmware MOCHI_ESP32C3.ino.
+            val serviceUuid = UUID.fromString(MainActivity.MOCHI_SERVICE_UUID)
+            val rxUuid = UUID.fromString("7b8a0002-6d8f-4f3a-9c2e-1b4a5d6e7f80")
+            val txUuid = UUID.fromString("7b8a0003-6d8f-4f3a-9c2e-1b4a5d6e7f80")
+            for (s in g.services.orEmpty()) {
+                for (c in s.characteristics.orEmpty()) {
+                    Log.i(TAG, "GATT service=${s.uuid} characteristic=${c.uuid} properties=0x${c.properties.toString(16)}")
+                }
             }
-            val w=write
-            if(w==null) {
-                connectionStatus="Terhubung, tetapi characteristic tulis tidak ditemukan"
-                Log.e(TAG,"Tidak ada characteristic WRITE; tidak bisa mengirim perintah")
+            val service = g.getService(serviceUuid)
+            if (service == null) {
+                connectionStatus = "GATT tersambung, service MOCHI tidak ditemukan"
+                Log.e(TAG, "Service target $serviceUuid tidak ditemukan")
+                disconnectRetry(g)
                 return
             }
-            rx=w.characteristic
-            tx=notify?.characteristic
-            ready=true
-            connectionStatus="Terhubung ke BLE; layanan ditemukan"
-            val context=appContext
-            if(context!=null) {
-                val actualName=try { g.device.name } catch(_:Exception) { null }
-                context.getSharedPreferences(MainActivity.PREFS,Context.MODE_PRIVATE).edit()
-                    .putString(MainActivity.KEY_DEVICE,g.device.address)
-                    .putString(MainActivity.KEY_DEVICE_NAME,actualName ?: "BLE")
-                    .putString(MainActivity.KEY_SERVICE_UUID,w.service.uuid.toString())
-                    .putString(MainActivity.KEY_RX_UUID,w.characteristic.uuid.toString())
-                    .putString(MainActivity.KEY_TX_UUID,notify?.characteristic?.uuid?.toString())
+            val writeChar = service.getCharacteristic(rxUuid)
+            val notifyChar = service.getCharacteristic(txUuid)
+            if (writeChar == null || (writeChar.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)) == 0) {
+                connectionStatus = "Service MOCHI ditemukan, RX tidak valid"
+                Log.e(TAG, "RX $rxUuid tidak ditemukan/tidak mendukung WRITE")
+                disconnectRetry(g)
+                return
+            }
+            rx = writeChar
+            tx = notifyChar
+            ready = true
+            connectionStatus = "GATT MOCHI siap; mengaktifkan notifikasi"
+            val context = appContext
+            if (context != null) {
+                val actualName = try { g.device.name } catch (_: Exception) { null }
+                context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE).edit()
+                    .putString(MainActivity.KEY_DEVICE, g.device.address)
+                    .putString(MainActivity.KEY_DEVICE_NAME, actualName ?: "MOCHI")
+                    .putString(MainActivity.KEY_SERVICE_UUID, serviceUuid.toString())
+                    .putString(MainActivity.KEY_RX_UUID, rxUuid.toString())
+                    .putString(MainActivity.KEY_TX_UUID, txUuid.toString())
                     .apply()
             }
-            Log.i(TAG,"GATT terpilih service=${w.service.uuid} RX=${w.characteristic.uuid} TX=${notify?.characteristic?.uuid}")
+            Log.i(TAG, "GATT MOCHI cocok: service=$serviceUuid RX=$rxUuid TX=$txUuid")
             tx?.let { enableNotifications(g,it) }
             synchronized(queue) {
-                if(queue.none { it.startsWith("TIME|") }) queue.addLast("TIME|${System.currentTimeMillis()/1000L}")
+                if (queue.none { it.startsWith("TIME|") }) queue.addLast("TIME|${System.currentTimeMillis()/1000L}")
+                if (queue.none { it == "PING" }) queue.addLast("PING")
             }
             writeNext()
         }
@@ -170,6 +175,7 @@ object MochiBleService {
             Log.i(TAG,"BLE response: $text")
             if(text.contains("TIME_OK")) connectionStatus="Terhubung • Jam tersinkron"
             if(text.contains("TIME_ERROR")) connectionStatus="Terhubung • Sinkronisasi jam gagal"
+            if(text.contains("PONG")) connectionStatus="Terhubung • PING/PONG berhasil"
         }
     }
 

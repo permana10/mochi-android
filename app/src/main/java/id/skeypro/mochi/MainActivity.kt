@@ -34,6 +34,7 @@ class MainActivity : Activity() {
         const val KEY_SERVICE_UUID = "service_uuid"
         const val KEY_RX_UUID = "rx_uuid"
         const val KEY_TX_UUID = "tx_uuid"
+        const val MOCHI_SERVICE_UUID = "7b8a0001-6d8f-4f3a-9c2e-1b4a5d6e7f80"
         private const val SCAN_MS = 15000L
     }
     private lateinit var statusText: TextView
@@ -108,28 +109,14 @@ class MainActivity : Activity() {
             if(scanner==null) { log("BLE scanner tidak tersedia."); return }
             seen.clear(); attempts.clear(); connectingAddress=null; scanning=true
             statusText.text="Status: mencari perangkat BLE..."
-            log("Adaptor Bluetooth aktif: ${bt.isEnabled}")
-            log("Pemindai BLE tersedia; memulai scan tanpa filter.")
-            if (Build.VERSION.SDK_INT < 31) {
-                val lm = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
-                val locationOn = try {
-                    if (Build.VERSION.SDK_INT >= 28) lm.isLocationEnabled
-                    else lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) ||
-                         lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
-                } catch (_: Exception) { false }
-                log("Layanan lokasi: ${if (locationOn) "aktif" else "nonaktif"}")
-                if (!locationOn) log("Aktifkan Lokasi Android; diperlukan oleh sebagian perangkat untuk scan BLE.")
-            }
             log("Memindai semua perangkat BLE selama 15 detik.")
-            scanner.startScan(emptyList(), ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .setReportDelay(0)
-                .build(), callback)
+            scanner.startScan(callback)
+            log("Scan BLE dimulai tanpa filter; service target=${MOCHI_SERVICE_UUID}")
             handler.postDelayed({
                 if(scanning) {
                     stopScan()
                     log("Scan selesai. Total perangkat ditemukan: ${seen.size}")
-                    if(seen.isEmpty()) log("Android tidak menerima hasil BLE. Periksa izin, Bluetooth, dan advertising perangkat.")
+                    if(seen.isEmpty()) log("HASIL=0. Izin/adaptor lolos tetapi callback tidak menerima iklan. Pastikan firmware ESP32-C3 benar-benar upload dan serial menampilkan BLE advertising: MOCHI; reboot ESP32 lalu scan lagi.")
                     else if(connectingAddress==null) log("Belum menemukan nama MOCHI atau MAC perangkat tersimpan.")
                 }
             },SCAN_MS)
@@ -142,7 +129,8 @@ class MainActivity : Activity() {
         override fun onBatchScanResults(results:MutableList<ScanResult>) { results.forEach { process(it) } }
         override fun onScanFailed(errorCode:Int) {
             scanning=false
-            log("SCAN BLE GAGAL: kode=$errorCode (1=already started, 2=app registration, 3=internal, 4=feature unsupported, 5=out of hardware resources)")
+            statusText.text="Status: pemindaian BLE gagal ($errorCode)"
+            log("SCAN_FAILED code=$errorCode (1=already started, 2=application registration failed, 3=internal error, 4=feature unsupported, 5=out of hardware resources, 6=scanning too frequently)")
         }
     }
     private fun process(r:ScanResult) {
@@ -152,11 +140,13 @@ class MainActivity : Activity() {
             val name=r.scanRecord?.deviceName?.takeIf { it.isNotBlank() }
                 ?: try { r.device.name?.takeIf { it.isNotBlank() } } catch(_:SecurityException) { null }
                 ?: "(tanpa nama)"
-            val uuids=r.scanRecord?.serviceUuids.orEmpty().joinToString { it.uuid.toString() }
+            val advertisedUuids=r.scanRecord?.serviceUuids.orEmpty().map { it.uuid.toString().lowercase() }
+            val uuids=advertisedUuids.joinToString()
             if(seen.add(address)) log("BLE: nama=$name | MAC=$address | RSSI=${r.rssi} dBm | UUID iklan=${uuids.ifBlank { "(tidak diiklankan)" }}")
             val saved=getSharedPreferences(PREFS,MODE_PRIVATE).getString(KEY_DEVICE,null)
-            // UUID tidak ditebak. Hanya auto-connect ke nama MOCHI atau MAC yang pernah tersimpan.
-            if(!name.equals("MOCHI",true) && (saved.isNullOrBlank() || !address.equals(saved,true))) return
+            val serviceMatch=advertisedUuids.contains(MOCHI_SERVICE_UUID)
+            // Firmware MOCHI mengiklankan nama MOCHI dan service UUID di atas.
+            if(!name.equals("MOCHI",true) && !serviceMatch && (saved.isNullOrBlank() || !address.equals(saved,true))) return
             if(!attempts.add(address)) return
             connectingAddress=address
             getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString(KEY_DEVICE,address).putString(KEY_DEVICE_NAME,name).apply()
@@ -180,7 +170,7 @@ class MainActivity : Activity() {
         MochiBleService.sendCommand(applicationContext,"TIME|$epoch")
         log("Perintah sinkronisasi waktu dikirim: $epoch")
     }
-    private fun log(s:String) { runOnUiThread { if(::logText.isInitialized) { logText.append("• $s\n"); logText.post { val l=logText.layout; if(l!=null) logText.scrollTo(0,(l.getLineTop(logText.lineCount)-logText.height).coerceAtLeast(0)) } } } }
+    private fun log(s:String) { runOnUiThread { if(::logText.isInitialized) { logText.append("• $s\n"); logText.post { val l=logText.layout; if(l!=null) logText.scrollTo(0,(l.getLineTop(logText.lineCount)-logText.height).coerceAtLeast(0)) } }; if(::statusText.isInitialized) statusText.text="Status: ${MochiBleService.connectionStatus}" } }
     private fun createNotificationChannel() {
         if(Build.VERSION.SDK_INT>=26) {
             val c=NotificationChannel("mochi_status","Mochi status",NotificationManager.IMPORTANCE_LOW)
