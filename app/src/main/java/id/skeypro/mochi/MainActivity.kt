@@ -68,7 +68,7 @@ class MainActivity : Activity() {
         val time = Button(this).apply { text="Sinkronkan Jam"; setOnClickListener { sendTime() } }
         val notif = Button(this).apply { text="Aktifkan Akses Notifikasi"; setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } }
         val bt = Button(this).apply { text="Pengaturan Bluetooth"; setOnClickListener { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) } }
-        logText = TextView(this).apply { textSize=13f; setTextColor(0xFF202124.toInt()); movementMethod=ScrollingMovementMethod(); text="Log Mochi siap.\\n" }
+        logText = TextView(this).apply { textSize=13f; setTextColor(0xFF202124.toInt()); movementMethod=ScrollingMovementMethod(); text="Log Mochi siap.\n" }
         val scroll = ScrollView(this).apply { addView(logText) }
         listOf(title,statusText,scan,time,notif,bt).forEach { outer.addView(it, matchWrap()) }
         outer.addView(scroll, LinearLayout.LayoutParams(-1,0,1f))
@@ -108,8 +108,23 @@ class MainActivity : Activity() {
             if(scanner==null) { log("BLE scanner tidak tersedia."); return }
             seen.clear(); attempts.clear(); connectingAddress=null; scanning=true
             statusText.text="Status: mencari perangkat BLE..."
+            log("Adaptor Bluetooth aktif: ${bt.isEnabled}")
+            log("Pemindai BLE tersedia; memulai scan tanpa filter.")
+            if (Build.VERSION.SDK_INT < 31) {
+                val lm = getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+                val locationOn = try {
+                    if (Build.VERSION.SDK_INT >= 28) lm.isLocationEnabled
+                    else lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) ||
+                         lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
+                } catch (_: Exception) { false }
+                log("Layanan lokasi: ${if (locationOn) "aktif" else "nonaktif"}")
+                if (!locationOn) log("Aktifkan Lokasi Android; diperlukan oleh sebagian perangkat untuk scan BLE.")
+            }
             log("Memindai semua perangkat BLE selama 15 detik.")
-            scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).setReportDelay(0).build(), callback)
+            scanner.startScan(emptyList(), ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setReportDelay(0)
+                .build(), callback)
             handler.postDelayed({
                 if(scanning) {
                     stopScan()
@@ -125,7 +140,10 @@ class MainActivity : Activity() {
     private val callback=object:ScanCallback() {
         override fun onScanResult(callbackType:Int,result:ScanResult) { process(result) }
         override fun onBatchScanResults(results:MutableList<ScanResult>) { results.forEach { process(it) } }
-        override fun onScanFailed(errorCode:Int) { scanning=false; log("Scan BLE gagal: kode $errorCode") }
+        override fun onScanFailed(errorCode:Int) {
+            scanning=false
+            log("SCAN BLE GAGAL: kode=$errorCode (1=already started, 2=app registration, 3=internal, 4=feature unsupported, 5=out of hardware resources)")
+        }
     }
     private fun process(r:ScanResult) {
         if(!scanning) return
@@ -162,7 +180,7 @@ class MainActivity : Activity() {
         MochiBleService.sendCommand(applicationContext,"TIME|$epoch")
         log("Perintah sinkronisasi waktu dikirim: $epoch")
     }
-    private fun log(s:String) { runOnUiThread { if(::logText.isInitialized) { logText.append("• $s\\n"); logText.post { val l=logText.layout; if(l!=null) logText.scrollTo(0,(l.getLineTop(logText.lineCount)-logText.height).coerceAtLeast(0)) } }; if(::statusText.isInitialized) statusText.text="Status: ${MochiBleService.connectionStatus}" } }
+    private fun log(s:String) { runOnUiThread { if(::logText.isInitialized) { logText.append("• $s\n"); logText.post { val l=logText.layout; if(l!=null) logText.scrollTo(0,(l.getLineTop(logText.lineCount)-logText.height).coerceAtLeast(0)) } } } }
     private fun createNotificationChannel() {
         if(Build.VERSION.SDK_INT>=26) {
             val c=NotificationChannel("mochi_status","Mochi status",NotificationManager.IMPORTANCE_LOW)
