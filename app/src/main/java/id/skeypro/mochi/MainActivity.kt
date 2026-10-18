@@ -9,6 +9,9 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.bluetooth.le.ScanFilter
+import android.os.ParcelUuid
+import java.util.UUID
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -36,6 +39,7 @@ class MainActivity : Activity() {
         const val KEY_RX_UUID = "rx_uuid"
         const val KEY_TX_UUID = "tx_uuid"
         private const val SCAN_MS = 15000L
+        private val MOCHI_SERVICE_UUID: UUID = UUID.fromString("7b8a0001-6d8f-4f3a-9c2e-1b4a5d6e7f80")
     }
     private lateinit var statusText: TextView
     private lateinit var logText: TextView
@@ -55,6 +59,14 @@ class MainActivity : Activity() {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
         p.getString(KEY_DEVICE, null)?.let { log("MAC tersimpan: $it") }
     }
+    private val statusPoll = object : Runnable {
+        override fun run() {
+            if (::statusText.isInitialized) statusText.text = "Status: ${MochiBleService.connectionStatus}"
+            handler.postDelayed(this, 500L)
+        }
+    }
+    override fun onResume() { super.onResume(); handler.post(statusPoll) }
+    override fun onPause() { handler.removeCallbacks(statusPoll); super.onPause() }
     override fun onDestroy() { stopScan(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
 
     private fun buildUi() {
@@ -116,9 +128,15 @@ class MainActivity : Activity() {
             seen.clear(); attempts.clear(); connectingAddress=null; scanning=true
             statusText.text="Status: mencari perangkat BLE..."
             log("Mulai BLE scan standar tanpa filter. Android=${Build.VERSION.SDK_INT}; adapter=${bt.isEnabled}; scanner=tersedia.")
-            // Pakai overload standar Android. Tidak memasang filter nama/service karena
-            // nama MOCHI dapat berada di scan response, bukan paket advertising utama.
-            scanner.startScan(callback)
+            // Filter berdasarkan UUID layanan MOCHI yang diiklankan firmware.
+            // Tidak memakai MAC tersimpan sebagai identitas karena MAC dapat berubah.
+            val filter = ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(MOCHI_SERVICE_UUID))
+                .build()
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            scanner.startScan(listOf(filter), settings, callback)
             handler.postDelayed(scanTimeout, SCAN_MS)
         } catch(e:SecurityException) { scanning=false; log("SecurityException saat scan: ${e.message}") }
           catch(e:Exception) { scanning=false; log("Gagal memulai scan: ${e.javaClass.simpleName}: ${e.message}") }
@@ -146,9 +164,11 @@ class MainActivity : Activity() {
                 ?: "(tanpa nama)"
             val uuids=r.scanRecord?.serviceUuids.orEmpty().joinToString { it.uuid.toString() }
             if(seen.add(address)) log("BLE: nama=$name | MAC=$address | RSSI=${r.rssi} dBm | UUID iklan=${uuids.ifBlank { "(tidak diiklankan)" }}")
-            val saved=getSharedPreferences(PREFS,MODE_PRIVATE).getString(KEY_DEVICE,null)
-            // UUID tidak ditebak. Hanya auto-connect ke nama MOCHI atau MAC yang pernah tersimpan.
-            if(!name.equals("MOCHI",true) && (saved.isNullOrBlank() || !address.equals(saved,true))) return
+            // Identitas target adalah UUID layanan, bukan MAC permanen.
+            val hasMochiService = r.scanRecord?.serviceUuids?.any {
+                it.uuid == MOCHI_SERVICE_UUID
+            } == true
+            if (!hasMochiService && !name.equals("MOCHI", true)) return
             if(!attempts.add(address)) return
             connectingAddress=address
             getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString(KEY_DEVICE,address).putString(KEY_DEVICE_NAME,name).apply()
@@ -167,11 +187,13 @@ class MainActivity : Activity() {
     }
     private fun sendTime() {
         if(!hasPermissions()) { requestBlePermissions(); return }
-        val address=getSharedPreferences(PREFS,MODE_PRIVATE).getString(KEY_DEVICE,null)
-        if(address.isNullOrBlank()) { log("Belum ada MAC tersimpan. Cari perangkat dahulu."); return }
+        if (!MochiBleService.isConnected()) {
+            log("MOCHI belum terhubung ke GATT. Tekan Cari / Hubungkan MOCHI dahulu.")
+            return
+        }
         val epoch=System.currentTimeMillis()/1000L
         MochiBleService.sendCommand(applicationContext,"TIME|$epoch")
-        log("Perintah sinkronisasi waktu dikirim: $epoch")
+        log("Permintaan sinkronisasi waktu dikirim; menunggu balasan TIME_OK.")
     }
     private fun log(s:String) { runOnUiThread { if(::logText.isInitialized) { logText.append("• $s\n"); logText.post { val l=logText.layout; if(l!=null) logText.scrollTo(0,(l.getLineTop(logText.lineCount)-logText.height).coerceAtLeast(0)) } }; if(::statusText.isInitialized) statusText.text="Status: ${MochiBleService.connectionStatus}" } }
     private fun createNotificationChannel() {
