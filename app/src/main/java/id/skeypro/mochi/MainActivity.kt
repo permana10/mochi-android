@@ -77,23 +77,26 @@ class MainActivity : Activity() {
     }
     private fun matchWrap() = LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT)
 
-    // Android 12+ (API 31+) memakai izin BLUETOOTH_SCAN/CONNECT.
-    // ACCESS_FINE_LOCATION tidak boleh diwajibkan pada Android 12+ untuk alur BLE ini.
-    private fun hasPermissions() = if (Build.VERSION.SDK_INT >= 31) {
-        checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED &&
-        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED
-    } else if (Build.VERSION.SDK_INT >= 23) {
-        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
-    } else true
+    // Scan BLE tanpa neverForLocation: minta izin lokasi juga agar Android tidak
+    // menyaring hasil scan karena deklarasi izin tidak konsisten.
+    private fun hasPermissions(): Boolean {
+        if (Build.VERSION.SDK_INT >= 31 &&
+            (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED ||
+             checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)) return false
+        if (Build.VERSION.SDK_INT >= 23 &&
+            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return false
+        return true
+    }
 
     private fun requestBlePermissions() {
+        val required = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 31) {
-            val required=arrayOf(Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT)
-            val missing=required.filter { checkSelfPermission(it)!=PackageManager.PERMISSION_GRANTED }
-            if(missing.isNotEmpty()) requestPermissions(missing.toTypedArray(),100)
-        } else if(Build.VERSION.SDK_INT>=23 && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),100)
+            required += Manifest.permission.BLUETOOTH_SCAN
+            required += Manifest.permission.BLUETOOTH_CONNECT
         }
+        if (Build.VERSION.SDK_INT >= 23) required += Manifest.permission.ACCESS_FINE_LOCATION
+        val missing = required.distinct().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 100)
     }
     override fun onRequestPermissionsResult(requestCode:Int, permissions:Array<out String>, grantResults:IntArray) {
         super.onRequestPermissionsResult(requestCode,permissions,grantResults)
@@ -124,7 +127,7 @@ class MainActivity : Activity() {
         if(scanning) {
             stopScan()
             log("Scan selesai. Perangkat unik diterima callback: ${seen.size}")
-            if(seen.isEmpty()) log("Callback menerima 0 iklan BLE. Izin sudah lolos; perlu periksa hasil scan Android/logcat. Tidak perlu meminta izin Lokasi pada Android 12+.")
+            if(seen.isEmpty()) log("Callback menerima 0 iklan BLE. Periksa izin Lokasi aplikasi dan aktifkan layanan Lokasi Android; jika tetap 0, ambil logcat Bluetooth saat scan.")
             else if(connectingAddress==null) log("Perangkat terlihat, tetapi nama MOCHI/MAC tersimpan belum cocok. Periksa daftar BLE di log.")
         }
     }
