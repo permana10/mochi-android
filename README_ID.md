@@ -34,15 +34,10 @@ Karena itu karakter `|`, CR, dan LF dalam nilai notifikasi diganti spasi.
 - Proyek ini dibuat sebagai struktur dasar independen; integrasi dengan aplikasi Soundbox lama harus dilakukan setelah file proyek lama diperiksa.
 
 
-## Build APK melalui GitHub Actions (tanpa Android Studio)
+## Revisi 1.1 — pemantauan koneksi BLE aktif
 
-ZIP ini sudah menyertakan `.github/workflows/build-apk.yml`.
+Pada versi ini, status “komunikasi terverifikasi” tidak hanya berdasarkan PONG pertama. Aplikasi mengirim PING berkala dan memeriksa PONG terbaru. Jika tidak ada PONG selama sekitar 7 detik, aplikasi menandai koneksi hilang lalu mencoba menyambungkan kembali. Sinkronisasi jam otomatis hanya dijalankan pada handshake awal, bukan setiap heartbeat.
 
-1. Buat repository baru di GitHub, misalnya `mochi-android`.
-2. Upload **isi ZIP yang sudah diekstrak** ke root repository (folder `.github` harus ikut ter-upload), lalu commit ke branch `main`.
-3. Buka tab **Actions** pada repository. Workflow **Build MOCHI APK** akan berjalan setelah push.
-4. Tunggu sampai job hijau/berhasil.
-5. Buka hasil run workflow, bagian **Artifacts**, lalu unduh `MOCHI-debug-APK`.
-6. Ekstrak artifact tersebut untuk mendapatkan `app-debug.apk`.
+Firmware ESP32-C3 harus membalas perintah `PING` dengan `PONG`. Firmware MOCHI yang memakai protokol tersebut sudah memiliki handler PING/PONG.
 
-Workflow menjalankan Gradle 8.9 + JDK 17, memasang Android SDK, lalu mengunggah APK sebagai artifact. Ini adalah APK debug untuk pengujian, bukan rilis Play Store.
+Catatan: sumber ini belum dikompilasi atau diuji pada perangkat fisik dalam lingkungan ini. Buka folder proyek dengan Android Studio, lakukan Sync/Build, lalu uji dengan mematikan daya ESP32 saat koneksi aktif. Status tidak boleh terus menampilkan komunikasi terverifikasi; setelah batas timeout, status harus berubah menjadi koneksi hilang/menyambungkan ulang.

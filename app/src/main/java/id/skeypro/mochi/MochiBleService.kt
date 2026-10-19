@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.util.ArrayDeque
 import java.util.UUID
@@ -25,14 +26,16 @@ object MochiBleService {
     @Volatile private var writing=false
     @Volatile private var pingVerified=false
     private var handshakeTimeout: Runnable?=null
+    private var heartbeatRunnable: Runnable?=null
+    @Volatile private var lastPongElapsedMs:Long=0L
+    private val heartbeatIntervalMs=2500L
+    private val heartbeatTimeoutMs=7000L
     private val handler=Handler(Looper.getMainLooper())
     @Volatile private var addressToReconnect:String?=null
-    @Volatile private var autoConnectMode=false
-    @Volatile private var handedOffToAutoConnect=false
     @Volatile private var appContext:Context?=null
     private val queue=ArrayDeque<String>()
 
-    @Synchronized fun connect(context:Context,address:String, autoConnect:Boolean=false) {
+    @Synchronized fun connect(context:Context,address:String) {
         appContext=context.applicationContext
         addressToReconnect=address
         if(connected && ready && gatt?.device?.address.equals(address,true)) return
@@ -42,8 +45,8 @@ object MochiBleService {
             val manager=context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
             val device=manager.adapter.getRemoteDevice(address)
             gatt=if(Build.VERSION.SDK_INT>=23)
-                device.connectGatt(context.applicationContext,autoConnect,callback,BluetoothDevice.TRANSPORT_LE)
-            else device.connectGatt(context.applicationContext,autoConnect,callback)
+                device.connectGatt(context.applicationContext,false,callback,BluetoothDevice.TRANSPORT_LE)
+            else device.connectGatt(context.applicationContext,false,callback)
             if(gatt==null) retry()
         } catch(e:Exception) {
             connectionStatus="Gagal menghubungkan: ${e.message}"
@@ -57,7 +60,7 @@ object MochiBleService {
         synchronized(queue) { if(queue.size>=50) { Log.w(TAG,"Queue penuh"); return }; queue.addLast(command) }
         if(!connected || !ready || rx==null || gatt==null) {
             val a=addressToReconnect ?: context.getSharedPreferences(MainActivity.PREFS,0).getString(MainActivity.KEY_DEVICE,null)
-            if(!a.isNullOrBlank() && !connected) connect(context.applicationContext,a,autoConnect=true)
+            if(!a.isNullOrBlank() && !connected) connect(context.applicationContext,a)
             Log.i(TAG,"Perintah diantrekan: $command"); return
         }
         writeNext()
@@ -92,22 +95,18 @@ object MochiBleService {
         override fun onConnectionStateChange(g:BluetoothGatt,status:Int,newState:Int) {
             if(g!==gatt) { try { g.close() } catch(_:Exception) {}; return }
             if(status==BluetoothGatt.GATT_SUCCESS && newState==BluetoothProfile.STATE_CONNECTED) {
-                connected=true; ready=false; pingVerified=false; connectionStatus="BLE GATT tersambung, membaca layanan..."
+                stopHeartbeat()
+                connected=true; ready=false; writing=false; pingVerified=false; lastPongElapsedMs=0L
+                connectionStatus="BLE GATT tersambung, membaca layanan..."
                 if(!g.discoverServices()) { connectionStatus="Gagal membaca layanan"; disconnectRetry(g) }
             } else {
-                connected=false; ready=false; writing=false; pingVerified=false; rx=null; tx=null
+                stopHeartbeat()
+                connected=false; ready=false; writing=false; pingVerified=false; lastPongElapsedMs=0L; rx=null; tx=null
                 handshakeTimeout?.let { handler.removeCallbacks(it) }
                 connectionStatus="BLE terputus (status=$status)"
-                if (autoConnectMode) {
-                    // Pertahankan objek GATT dan permintaan autoConnect; Android akan
-                    // mencoba koneksi kembali ketika perangkat yang dikenal tersedia.
-                    connectionStatus = "MOCHI mati/di luar jangkauan; menunggu auto-connect Android"
-                    Log.i(TAG, "GATT autoConnect dipertahankan; tidak melakukan scan/retry aktif")
-                } else {
-                    try { g.close() } catch(_:Exception) {}
-                    if(gatt===g) gatt=null
-                    retry()
-                }
+                try { g.close() } catch(_:Exception) {}
+                if(gatt===g) gatt=null
+                retry()
             }
         }
 
@@ -173,19 +172,10 @@ object MochiBleService {
                 val value=if((c.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE)!=0 &&
                     (c.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY)==0)
                     BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                val started = if (Build.VERSION.SDK_INT >= 33) {
-                    g.writeDescriptor(d, value) == BluetoothStatusCodes.SUCCESS
-                } else {
-                    @Suppress("DEPRECATION") d.value = value
+                if(Build.VERSION.SDK_INT>=33) g.writeDescriptor(d,value)
+                else {
+                    @Suppress("DEPRECATION") d.value=value
                     @Suppress("DEPRECATION") g.writeDescriptor(d)
-                }
-                if (!started) {
-                    connectionStatus = "Penulisan CCCD gagal dimulai"
-                    Log.e(TAG, "writeDescriptor(CCCD) gagal dimulai")
-                    disconnectRetry(g)
-                } else {
-                    connectionStatus = "Mengaktifkan notifikasi TX..."
-                    Log.i(TAG, "CCCD write dimulai: ${value.joinToString { "%02X".format(it) }}")
                 }
             } catch(e:Exception) {
                 Log.e(TAG,"Notifikasi gagal",e)
@@ -195,7 +185,7 @@ object MochiBleService {
         }
 
         override fun onDescriptorWrite(g:BluetoothGatt, descriptor:BluetoothGattDescriptor, status:Int) {
-            if (g !== gatt || descriptor.uuid != cccd || descriptor.characteristic.uuid != tx?.uuid) return
+            if (g !== gatt || descriptor.uuid != cccd) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 connectionStatus = "Aktivasi notifikasi gagal ($status)"
                 disconnectRetry(g)
@@ -203,8 +193,7 @@ object MochiBleService {
             }
             ready = true
             pingVerified = false
-            connectionStatus = "Notifikasi TX aktif; verifikasi PING/PONG..."
-            Log.i(TAG, "CCCD berhasil ditulis; notifikasi TX aktif")
+            connectionStatus = "GATT siap; verifikasi PING/PONG..."
             synchronized(queue) {
                 queue.addFirst("PING")
             }
@@ -229,38 +218,31 @@ object MochiBleService {
             writeNext()
         }
         override fun onCharacteristicChanged(g:BluetoothGatt,c:BluetoothGattCharacteristic,value:ByteArray) {
-            if (g !== gatt) return
             handleResponse(c,value)
         }
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(g:BluetoothGatt,c:BluetoothGattCharacteristic) {
-            if (g !== gatt) return
             handleResponse(c,c.value ?: byteArrayOf())
         }
         private fun handleResponse(c:BluetoothGattCharacteristic,value:ByteArray) {
             if(c.uuid!=tx?.uuid) return
-            val text=value.toString(Charsets.UTF_8)
+            val text=value.toString(Charsets.UTF_8).trim()
             Log.i(TAG,"BLE response: $text")
-            if (text.trim() == "PONG") {
+            if (text == "PONG") {
+                lastPongElapsedMs = SystemClock.elapsedRealtime()
+                val firstVerification = !pingVerified
                 pingVerified = true
                 handshakeTimeout?.let { handler.removeCallbacks(it) }
-                connectionStatus = "MOCHI terhubung • komunikasi terverifikasi"
-                synchronized(queue) {
-                    if (queue.none { it.startsWith("TIME|") }) {
-                        queue.addLast("TIME|${System.currentTimeMillis()/1000L}")
+                if (firstVerification) {
+                    connectionStatus = "MOCHI terhubung • komunikasi terverifikasi"
+                    // Sinkronkan jam hanya sekali saat handshake awal, bukan setiap PONG.
+                    synchronized(queue) {
+                        if (queue.none { it.startsWith("TIME|") }) {
+                            queue.addLast("TIME|${System.currentTimeMillis()/1000L}")
+                        }
                     }
-                }
-                writeNext()
-                if (!handedOffToAutoConnect) {
-                    handedOffToAutoConnect = true
-                    val address = addressToReconnect
-                    val context = appContext
-                    if (address != null && context != null) {
-                        handler.postDelayed({
-                            Log.i(TAG, "Beralih ke koneksi GATT autoConnect tanpa pemindaian aktif berulang")
-                            connect(context, address, autoConnect = true)
-                        }, 700L)
-                    }
+                    scheduleHeartbeat(gatt ?: return)
+                    writeNext()
                 }
                 return
             }
@@ -270,13 +252,49 @@ object MochiBleService {
         }
     }
 
+
+    /**
+     * PONG awal hanya membuktikan koneksi pada satu waktu.
+     * Heartbeat berkala memastikan status UI tidak terus menyatakan terhubung
+     * setelah ESP32 mati atau berhenti merespons.
+     */
+    @Synchronized private fun scheduleHeartbeat(g:BluetoothGatt) {
+        heartbeatRunnable?.let { handler.removeCallbacks(it) }
+        val task = object:Runnable {
+            override fun run() {
+                if (gatt !== g || !connected || !ready || !pingVerified) return
+                val age = SystemClock.elapsedRealtime() - lastPongElapsedMs
+                if (lastPongElapsedMs == 0L || age >= heartbeatTimeoutMs) {
+                    connectionStatus = "MOCHI tidak merespons • koneksi hilang"
+                    Log.e(TAG, "Heartbeat timeout: tidak menerima PONG selama ${age}ms")
+                    disconnectRetry(g)
+                    return
+                }
+                synchronized(queue) {
+                    if (!queue.contains("PING")) queue.addLast("PING")
+                }
+                writeNext()
+                handler.postDelayed(this, heartbeatIntervalMs)
+            }
+        }
+        heartbeatRunnable = task
+        handler.postDelayed(task, heartbeatIntervalMs)
+    }
+
+    @Synchronized private fun stopHeartbeat() {
+        heartbeatRunnable?.let { handler.removeCallbacks(it) }
+        heartbeatRunnable = null
+        lastPongElapsedMs = 0L
+    }
+
     private fun disconnectRetry(g:BluetoothGatt) {
+        stopHeartbeat()
         connected=false; ready=false; writing=false; pingVerified=false; rx=null; tx=null
         handshakeTimeout?.let { handler.removeCallbacks(it) }
         try { g.disconnect() } catch(_:Exception) {}
         try { g.close() } catch(_:Exception) {}
         if(gatt===g) gatt=null
-        if (!autoConnectMode) retry()
+        retry()
     }
     private fun retry() {
         handler.removeCallbacks(reconnectRunnable)
@@ -284,10 +302,10 @@ object MochiBleService {
     }
     private val reconnectRunnable=Runnable {
         val a=addressToReconnect; val c=appContext
-        if (!autoConnectMode && !a.isNullOrBlank() && c!=null && !connected && gatt==null)
-            connect(c,a,autoConnect=false)
+        if(!a.isNullOrBlank() && c!=null && !connected && gatt==null) connect(c,a)
     }
     @Synchronized private fun closeGatt() {
+        stopHeartbeat()
         val old=gatt; gatt=null; connected=false; ready=false; writing=false; pingVerified=false; rx=null; tx=null
         handshakeTimeout?.let { handler.removeCallbacks(it) }
         try { old?.disconnect() } catch(_:Exception) {}
