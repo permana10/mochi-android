@@ -36,8 +36,16 @@ Karena itu karakter `|`, CR, dan LF dalam nilai notifikasi diganti spasi.
 
 ## Revisi 1.1 — pemantauan koneksi BLE aktif
 
-Pada versi ini, status “komunikasi terverifikasi” tidak hanya berdasarkan PONG pertama. Aplikasi mengirim PING berkala dan memeriksa PONG terbaru. Jika tidak ada PONG selama sekitar 7 detik, aplikasi menandai koneksi hilang lalu mencoba menyambungkan kembali. Sinkronisasi jam otomatis hanya dijalankan pada handshake awal, bukan setiap heartbeat.
+Pada versi ini, status “komunikasi terverifikasi” tidak hanya berdasarkan PONG pertama. Aplikasi mengirim PING setiap 5 menit dan memeriksa PONG terbaru. Jika tidak ada PONG selama sekitar 15 menit, aplikasi menandai koneksi hilang lalu mencoba menyambungkan kembali. Sinkronisasi jam otomatis hanya dijalankan pada handshake awal, bukan setiap heartbeat.
 
 Firmware ESP32-C3 harus membalas perintah `PING` dengan `PONG`. Firmware MOCHI yang memakai protokol tersebut sudah memiliki handler PING/PONG.
 
 Catatan: sumber ini belum dikompilasi atau diuji pada perangkat fisik dalam lingkungan ini. Buka folder proyek dengan Android Studio, lakukan Sync/Build, lalu uji dengan mematikan daya ESP32 saat koneksi aktif. Status tidak boleh terus menampilkan komunikasi terverifikasi; setelah batas timeout, status harus berubah menjadi koneksi hilang/menyambungkan ulang.
+
+
+## Revisi koneksi — interval hemat baterai dan reconnect terbatas
+- Setelah komunikasi terverifikasi, PING dijadwalkan setiap 12 menit (5 kali per jam; 120 kali per 24 jam jika selalu terhubung).
+- Timeout PONG adalah 26 menit agar tidak memutus koneksi sebelum heartbeat berikutnya diberi kesempatan.
+- Setelah putus/gagal: percobaan ulang pertama setelah 5 detik, lalu maksimal 4 percobaan tambahan dengan jeda 10 detik (5 percobaan total).
+- Setelah 5 percobaan gagal, reconnect otomatis berhenti (OFF); pengguna dapat menekan Hubungkan lagi atau mematikan/menyalakan Bluetooth untuk memulai ulang.
+- Saat Bluetooth HP mati, GATT dan heartbeat dihentikan serta tidak ada reconnect selama radio mati.

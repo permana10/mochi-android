@@ -29,12 +29,14 @@ object MochiBleService {
     private var handshakeTimeout: Runnable?=null
     private var heartbeatRunnable: Runnable?=null
     @Volatile private var lastPongElapsedMs:Long=0L
-    private val heartbeatIntervalMs=2500L
-    private val heartbeatTimeoutMs=7000L
+    private val heartbeatIntervalMs=720000L // 12 menit; maksimal 5 PING terjadwal per jam
+    private val heartbeatTimeoutMs=1560000L // 26 menit: beri waktu untuk interval PING 12 menit + toleransi
     private val handler=Handler(Looper.getMainLooper())
     @Volatile private var addressToReconnect:String?=null
     @Volatile private var appContext:Context?=null
     private val queue=ArrayDeque<String>()
+    private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 5
 
     @Synchronized fun connect(context:Context,address:String) {
         appContext=context.applicationContext
@@ -45,6 +47,8 @@ object MochiBleService {
             return
         }
         if(connected && ready && pingVerified && gatt?.device?.address.equals(address,true)) return
+        handler.removeCallbacks(reconnectRunnable)
+        reconnectAttempts = 0
         closeGatt()
         connectionStatus="Menghubungkan BLE..."
         try {
@@ -86,8 +90,9 @@ object MochiBleService {
                 .getString(MainActivity.KEY_DEVICE, null)
             if (!address.isNullOrBlank()) {
                 addressToReconnect = address
+                reconnectAttempts = 0
                 handler.removeCallbacks(reconnectRunnable)
-                handler.postDelayed(reconnectRunnable, 800L)
+                handler.postDelayed(reconnectRunnable, 5000L)
             }
         }
     }
@@ -279,6 +284,7 @@ object MochiBleService {
                             queue.addLast("TIME|${System.currentTimeMillis()/1000L}")
                         }
                     }
+                    reconnectAttempts = 0
                     scheduleHeartbeat(gatt ?: return)
                     writeNext()
                 }
@@ -334,9 +340,23 @@ object MochiBleService {
         if(gatt===g) gatt=null
         retry()
     }
-    private fun retry() {
+    /**
+     * Retry policy requested for MOCHI:
+     * - first retry after disconnect/failure: 5 seconds
+     * - next retries: every 10 seconds, maximum 5 attempts total
+     * - after exhaustion: stop automatically; user may tap Connect or toggle Bluetooth.
+     */
+    @Synchronized private fun retry() {
+        if (reconnectAttempts >= maxReconnectAttempts) {
+            handler.removeCallbacks(reconnectRunnable)
+            connectionStatus = "Reconnect OFF • MOCHI tidak ditemukan; tekan Hubungkan untuk mencoba lagi"
+            Log.w(TAG, "Reconnect dihentikan setelah $maxReconnectAttempts percobaan")
+            return
+        }
         handler.removeCallbacks(reconnectRunnable)
-        handler.postDelayed(reconnectRunnable,3000L)
+        val delayMs = if (reconnectAttempts == 0) 5000L else 10000L
+        connectionStatus = "Mochi terputus • mencoba lagi ${reconnectAttempts + 1}/$maxReconnectAttempts dalam ${delayMs / 1000} detik"
+        handler.postDelayed(reconnectRunnable, delayMs)
     }
     private val reconnectRunnable=Runnable {
         val a=addressToReconnect; val c=appContext
@@ -344,7 +364,44 @@ object MochiBleService {
             val manager = c?.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             manager?.adapter?.isEnabled == true
         } catch (_: Exception) { false }
-        if(enabled && !a.isNullOrBlank() && c!=null && !connected && gatt==null) connect(c,a)
+        if (!enabled) {
+            connectionStatus = "Bluetooth HP mati • reconnect OFF"
+            return@Runnable
+        }
+        if (!a.isNullOrBlank() && c!=null && !connected && gatt==null) {
+            synchronized(this) {
+                if (reconnectAttempts >= maxReconnectAttempts) {
+                    connectionStatus = "Reconnect OFF • batas percobaan tercapai"
+                    return@Runnable
+                }
+                reconnectAttempts++
+                Log.i(TAG, "Percobaan reconnect $reconnectAttempts/$maxReconnectAttempts")
+            }
+            connectInternal(c, a)
+        }
+    }
+    /** Connect without resetting the bounded retry counter. */
+    @Synchronized private fun connectInternal(context: Context, address: String) {
+        appContext=context.applicationContext
+        addressToReconnect=address
+        val manager=context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        if (manager.adapter?.isEnabled != true) {
+            connectionStatus="Bluetooth HP mati • reconnect OFF"
+            return
+        }
+        closeGatt()
+        connectionStatus="Mencoba reconnect BLE..."
+        try {
+            val device=manager.adapter.getRemoteDevice(address)
+            gatt=if(Build.VERSION.SDK_INT>=23)
+                device.connectGatt(context.applicationContext,false,callback,BluetoothDevice.TRANSPORT_LE)
+            else device.connectGatt(context.applicationContext,false,callback)
+            if(gatt==null) retry()
+        } catch(e:Exception) {
+            connectionStatus="Reconnect gagal: ${e.message}"
+            Log.e(TAG,"connectGatt reconnect",e)
+            retry()
+        }
     }
     @Synchronized private fun closeGatt() {
         stopHeartbeat()
