@@ -85,14 +85,22 @@ object MochiBleService {
             connectionStatus = "Bluetooth HP mati • koneksi Mochi dihentikan"
             Log.i(TAG, "Bluetooth sistem mati; GATT dan reconnect dihentikan")
         } else {
-            connectionStatus = "Bluetooth HP aktif • siap menghubungkan Mochi"
             val address = addressToReconnect ?: context.getSharedPreferences(MainActivity.PREFS, 0)
                 .getString(MainActivity.KEY_DEVICE, null)
             if (!address.isNullOrBlank()) {
                 addressToReconnect = address
-                reconnectAttempts = 0
-                handler.removeCallbacks(reconnectRunnable)
-                handler.postDelayed(reconnectRunnable, 5000L)
+                // Status koneksi aktif tidak dipalsukan setelah proses aplikasi dibuat ulang.
+                // MAC tetap tersimpan, lalu GATT + PING/PONG diverifikasi kembali otomatis.
+                if (connected && ready && pingVerified && gatt != null) {
+                    connectionStatus = "MOCHI terhubung • komunikasi terverifikasi"
+                } else {
+                    connectionStatus = "MOCHI tersimpan • memulihkan koneksi dalam 5 detik"
+                    reconnectAttempts = 0
+                    handler.removeCallbacks(reconnectRunnable)
+                    handler.postDelayed(reconnectRunnable, 5000L)
+                }
+            } else {
+                connectionStatus = "Bluetooth HP aktif • belum ada MOCHI tersimpan"
             }
         }
     }
