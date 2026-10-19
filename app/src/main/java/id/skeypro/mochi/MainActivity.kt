@@ -14,6 +14,8 @@ import android.os.ParcelUuid
 import java.util.UUID
 import android.content.Context
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -59,15 +61,52 @@ class MainActivity : Activity() {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
         p.getString(KEY_DEVICE, null)?.let { log("MAC tersimpan: $it") }
     }
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_OFF, BluetoothAdapter.STATE_TURNING_OFF -> {
+                    stopScan()
+                    MochiBleService.onBluetoothStateChanged(applicationContext, false)
+                    log("Bluetooth HP mati; koneksi dan auto-reconnect dihentikan.")
+                }
+                BluetoothAdapter.STATE_ON -> {
+                    MochiBleService.onBluetoothStateChanged(applicationContext, true)
+                    log("Bluetooth HP aktif kembali; mencoba menghubungkan Mochi.")
+                }
+            }
+        }
+    }
+    private var bluetoothReceiverRegistered = false
+
     private val statusPoll = object : Runnable {
         override fun run() {
             if (::statusText.isInitialized) statusText.text = "Status: ${MochiBleService.connectionStatus}"
             handler.postDelayed(this, 500L)
         }
     }
-    override fun onResume() { super.onResume(); handler.post(statusPoll) }
+    override fun onResume() {
+        super.onResume()
+        if (!bluetoothReceiverRegistered) {
+            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else @Suppress("DEPRECATION") registerReceiver(bluetoothStateReceiver, filter)
+            bluetoothReceiverRegistered = true
+        }
+        val enabled = try { adapter?.isEnabled == true } catch (_: SecurityException) { false }
+        MochiBleService.onBluetoothStateChanged(applicationContext, enabled)
+        handler.post(statusPoll)
+    }
     override fun onPause() { handler.removeCallbacks(statusPoll); super.onPause() }
-    override fun onDestroy() { stopScan(); handler.removeCallbacksAndMessages(null); super.onDestroy() }
+    override fun onDestroy() {
+        stopScan()
+        handler.removeCallbacksAndMessages(null)
+        if (bluetoothReceiverRegistered) {
+            try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) { }
+            bluetoothReceiverRegistered = false
+        }
+        super.onDestroy()
+    }
 
     private fun buildUi() {
         val outer = LinearLayout(this).apply {

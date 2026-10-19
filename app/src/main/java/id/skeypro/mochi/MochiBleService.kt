@@ -2,6 +2,7 @@ package id.skeypro.mochi
 
 import android.bluetooth.*
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -38,7 +39,12 @@ object MochiBleService {
     @Synchronized fun connect(context:Context,address:String) {
         appContext=context.applicationContext
         addressToReconnect=address
-        if(connected && ready && gatt?.device?.address.equals(address,true)) return
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        if (manager.adapter?.isEnabled != true) {
+            connectionStatus = "Bluetooth HP mati • aktifkan Bluetooth untuk menghubungkan Mochi"
+            return
+        }
+        if(connected && ready && pingVerified && gatt?.device?.address.equals(address,true)) return
         closeGatt()
         connectionStatus="Menghubungkan BLE..."
         try {
@@ -54,7 +60,39 @@ object MochiBleService {
         }
     }
 
-    fun isConnected(): Boolean = connected && ready && gatt != null && rx != null
+    /** Dipanggil saat status Bluetooth sistem berubah. Jangan pertahankan status lama ketika radio mati. */
+    @Synchronized fun onBluetoothStateChanged(context: Context, enabled: Boolean) {
+        appContext = context.applicationContext
+        if (!enabled) {
+            handler.removeCallbacks(reconnectRunnable)
+            stopHeartbeat()
+            handshakeTimeout?.let { handler.removeCallbacks(it) }
+            val old = gatt
+            gatt = null
+            connected = false
+            ready = false
+            writing = false
+            pingVerified = false
+            rx = null
+            tx = null
+            synchronized(queue) { queue.clear() }
+            try { old?.disconnect() } catch (_: Exception) { }
+            try { old?.close() } catch (_: Exception) { }
+            connectionStatus = "Bluetooth HP mati • koneksi Mochi dihentikan"
+            Log.i(TAG, "Bluetooth sistem mati; GATT dan reconnect dihentikan")
+        } else {
+            connectionStatus = "Bluetooth HP aktif • siap menghubungkan Mochi"
+            val address = addressToReconnect ?: context.getSharedPreferences(MainActivity.PREFS, 0)
+                .getString(MainActivity.KEY_DEVICE, null)
+            if (!address.isNullOrBlank()) {
+                addressToReconnect = address
+                handler.removeCallbacks(reconnectRunnable)
+                handler.postDelayed(reconnectRunnable, 800L)
+            }
+        }
+    }
+
+    fun isConnected(): Boolean = connected && ready && pingVerified && gatt != null && rx != null
 
     fun sendCommand(context:Context,command:String) {
         synchronized(queue) { if(queue.size>=50) { Log.w(TAG,"Queue penuh"); return }; queue.addLast(command) }
@@ -302,7 +340,11 @@ object MochiBleService {
     }
     private val reconnectRunnable=Runnable {
         val a=addressToReconnect; val c=appContext
-        if(!a.isNullOrBlank() && c!=null && !connected && gatt==null) connect(c,a)
+        val enabled = try {
+            val manager = c?.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            manager?.adapter?.isEnabled == true
+        } catch (_: Exception) { false }
+        if(enabled && !a.isNullOrBlank() && c!=null && !connected && gatt==null) connect(c,a)
     }
     @Synchronized private fun closeGatt() {
         stopHeartbeat()
